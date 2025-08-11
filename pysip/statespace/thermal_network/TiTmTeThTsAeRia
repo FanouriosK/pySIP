@@ -1,0 +1,152 @@
+from dataclasses import dataclass
+
+from ..base import RCModel
+
+
+@dataclass
+class TiTmTeThTsAeRia(RCModel):
+    """
+    Fifth order full CTSM-R model.
+
+    States:
+    Ts: Temperature of the sensor
+    Ti: Temperature of the interior (indoor air)
+    Tm: Temperature of the thermal mass (walls, furniture)
+    Th: Temperature of the heaters
+    Te: Temperature of the building envelope
+    """
+
+    # Define the 5 state variables of the model
+    states = [
+        ("TEMPERATURE", "xs", "sensor temperature"),
+        ("TEMPERATURE", "xi", "indoor temperature"),
+        ("TEMPERATURE", "xm", "internal mass temperature"),
+        ("TEMPERATURE", "xh", "heater temperature"),
+        ("TEMPERATURE", "xe", "envelope temperature"),
+    ]
+
+    # Define all parameters to be identified
+    params = [
+        # Physical parameters (Resistances)
+        ("THERMAL_RESISTANCE", "Ris", "between the indoor and the sensor"),
+        ("THERMAL_RESISTANCE", "Rim", "between the indoor and the internal mass"),
+        ("THERMAL_RESISTANCE", "Rih", "between the heater and the indoor"),
+        ("THERMAL_RESISTANCE", "Ria", "between the indoor and the ambient"),
+        ("THERMAL_RESISTANCE", "Rie", "between the indoor and the envelope"),
+        ("THERMAL_RESISTANCE", "Rea", "between the envelope and the ambient"),
+        # Physical parameters (Capacitances)
+        ("THERMAL_CAPACITY", "Cs", "of the sensor"),
+        ("THERMAL_CAPACITY", "Ci", "of the indoor air"),
+        ("THERMAL_CAPACITY", "Cm", "of the internal mass"),
+        ("THERMAL_CAPACITY", "Ch", "of the heaters"),
+        ("THERMAL_CAPACITY", "Ce", "of the envelope"),
+        # Physical parameters (Solar Apertures)
+        ("SOLAR_APERTURE", "Aw", "of the windows (to indoor)"),
+        ("SOLAR_APERTURE", "Ae", "of the envelope"),
+
+        # Stochastic parameters (process noise for each state)
+        ("STATE_DEVIATION", "sigw_s", "of the sensor dynamic"),
+        ("STATE_DEVIATION", "sigw_i", "of the indoor dynamic"),
+        ("STATE_DEVIATION", "sigw_m", "of the mass dynamic"),
+        ("STATE_DEVIATION", "sigw_h", "of the heater dynamic"),
+        ("STATE_DEVIATION", "sigw_e", "of the envelope dynamic"),
+
+        # Stochastic parameters (measurement noise)
+        ("MEASURE_DEVIATION", "sigv", "of the sensor temperature measurement"),
+
+        # Initial state estimates
+        ("INITIAL_MEAN", "x0_s", "of the sensor temperature"),
+        ("INITIAL_MEAN", "x0_i", "of the indoor temperature"),
+        ("INITIAL_MEAN", "x0_m", "of the mass temperature"),
+        ("INITIAL_MEAN", "x0_h", "of the heater temperature"),
+        ("INITIAL_MEAN", "x0_e", "of the envelope temperature"),
+        ("INITIAL_DEVIATION", "sigx0_s", "of the sensor temperature"),
+        ("INITIAL_DEVIATION", "sigx0_i", "of the indoor temperature"),
+        ("INITIAL_DEVIATION", "sigx0_m", "of the mass temperature"),
+        ("INITIAL_DEVIATION", "sigx0_h", "of the heater temperature"),
+        ("INITIAL_DEVIATION", "sigx0_e", "of the envelope temperature"),
+    ]
+
+    # Define the external inputs to the model
+    inputs = [
+        ("TEMPERATURE", "Ta", "ambient outdoor temperature"),
+        ("POWER", "Phi_s", "solar irradiance"),
+        ("POWER", "Phi_h", "HVAC system heat"),
+    ]
+
+    # Define the model outputs (what is measured)
+    outputs = [("TEMPERATURE", "xs", "sensor temperature")]
+
+    def __post_init__(self):
+        """Called after the dataclass is initialized."""
+        super().__post_init__()
+
+    def set_constant_continuous_ssm(self):
+        """Set the time-invariant parts of the state-space model matrices."""
+        # The output y is the first state, xs (sensor temperature)
+        self.C[0, 0] = 1.0
+
+    def update_continuous_ssm(self):
+        """
+        Update the continuous state-space matrices based on the current parameters.
+        """
+        # Unpack the parameters by their defined order
+        (
+            Ris, Rim, Rih, Ria, Rie, Rea,
+            Cs, Ci, Cm, Ch, Ce,
+            Aw, Ae,
+            sigw_s, sigw_i, sigw_m, sigw_h, sigw_e,
+            sigv,
+            x0_s, x0_i, x0_m, x0_h, x0_e,
+            sigx0_s, sigx0_i, sigx0_m, sigx0_h, sigx0_e,
+            *_,
+        ) = self.parameters.theta
+
+        # --- System Matrix A ---
+        # Derived from the 5 stochastic differential equations
+        # State order: [xs, xi, xm, xh, xe]
+        self.A[:] = [
+            # dTs/dt
+            [-1 / (Ris * Cs), 1 / (Ris * Cs), 0, 0, 0],
+            # dTi/dt
+            [
+                1 / (Ris * Ci),
+                -(1/Ria + 1/Ris + 1/Rim + 1/Rih + 1/Rie) / Ci,
+                1 / (Rim * Ci),
+                1 / (Rih * Ci),
+                1 / (Rie * Ci),
+            ],
+            # dTm/dt
+            [0, 1 / (Rim * Cm), -1 / (Rim * Cm), 0, 0],
+            # dTh/dt
+            [0, 1 / (Rih * Ch), 0, -1 / (Rih * Ch), 0],
+            # dTe/dt
+            [0, 1 / (Rie * Ce), 0, 0, -(1 / (Rie * Ce) + 1 / (Rea * Ce))],
+        ]
+
+        # --- Input Matrix B ---
+        # Maps inputs [Ta, Phi_s, Phi_h] to the states
+        self.B[:] = [
+            # Effect on Ts
+            [0, 0, 0],
+            # Effect on Ti
+            [1 / (Ria * Ci), Aw / Ci, 1 / Ci],
+            # Effect on Tm
+            [0, 0, 0],
+            # Effect on Th
+            [0, 0, 1 / Ch],
+            # Effect on Te
+            [1 / (Rea * Ce), Ae / Ce, 0],
+        ]
+
+        # --- Process Noise Covariance Matrix Q ---
+        self.Q[self._diag] = [sigw_s, sigw_i, sigw_m, sigw_h, sigw_e]
+
+        # --- Measurement Noise Covariance Matrix R ---
+        self.R[0, 0] = sigv
+
+        # --- Initial State Mean x0 ---
+        self.x0[:, 0] = [x0_s, x0_i, x0_m, x0_h, x0_e]
+
+        # --- Initial State Covariance P0 ---
+        self.P0[self._diag] = [sigx0_s, sigx0_i, sigx0_m, sigx0_h, sigx0_e]
